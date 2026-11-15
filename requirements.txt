@@ -1,0 +1,6 @@
+fastapi
+sqlmodel
+httpx
+uvicorn
+python-dotenv
+sarvamai

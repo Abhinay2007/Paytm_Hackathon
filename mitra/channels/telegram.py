@@ -42,8 +42,16 @@ async def _telegram_api(
     return result.get("result")
 
 
+def _is_integer_string(chat_id: int | str) -> bool:
+    value = str(chat_id)
+    if value.startswith("-"):
+        value = value[1:]
+    return bool(value) and value.isascii() and value.isdigit()
+
+
 async def send_message(chat_id: int | str, text: str) -> Any:
-    if str(chat_id).startswith("web"):
+    if not _is_integer_string(chat_id):
+        logger.debug("Skipping Telegram message for non-numeric chat id %r", chat_id)
         return None
     return await _telegram_api(
         "sendMessage",
@@ -52,6 +60,9 @@ async def send_message(chat_id: int | str, text: str) -> Any:
 
 
 async def send_typing(chat_id: int | str) -> Any:
+    if not _is_integer_string(chat_id):
+        logger.debug("Skipping Telegram typing action for non-numeric chat id %r", chat_id)
+        return None
     return await _telegram_api(
         "sendChatAction",
         {"chat_id": chat_id, "action": "typing"},

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, select
 
 from core.models import (
+    Customer,
     PaymentLink,
     Refund,
     Transaction,
@@ -135,6 +136,7 @@ def customer_history(
 ) -> dict[str, object]:
     with Session(engine) as session:
         refresh_pending(session)
+        customer = session.get(Customer, customer_id)
         transactions = session.exec(
             select(Transaction).where(Transaction.customer_id == customer_id)
         ).all()
@@ -148,6 +150,8 @@ def customer_history(
         )
         return {
             "customer_id": customer_id,
+            "name": customer.name if customer else None,
+            "language": customer.language if customer else None,
             "transactions": [transaction_json(txn) for txn in history],
             "refund_count": len(refunds),
             "duplicate_pairs": [

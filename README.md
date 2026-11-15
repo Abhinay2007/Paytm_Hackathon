@@ -28,7 +28,7 @@ curl -i 'http://localhost:8001/txns?status=FAILED,PENDING&min_age_s=0&customer_i
 # C3: inspect a transaction's bank status
 curl -i http://localhost:8001/bank/status/TXN1001
 
-# C4: customer history
+# C4: customer history (response includes the customer's name and language)
 curl -i 'http://localhost:8001/customers/C1/history?limit=10'
 
 # C5: create (or retrieve) a payment link for a FAILED transaction
