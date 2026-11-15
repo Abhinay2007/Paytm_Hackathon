@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CORE_URL = os.getenv("CORE_URL", "http://localhost:8001").rstrip("/")
-_client = httpx.AsyncClient(base_url=CORE_URL, timeout=10.0)
 
 
 class ToolError(Exception):
@@ -18,9 +17,10 @@ class ToolError(Exception):
 
 async def _request_json(method: str, path: str, **kwargs: Any) -> Any:
     try:
-        response = await _client.request(method, path, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        async with httpx.AsyncClient(base_url=CORE_URL, timeout=10.0) as client:
+            response = await client.request(method, path, **kwargs)
+            response.raise_for_status()
+            return response.json()
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text
         raise ToolError(

@@ -34,9 +34,10 @@ async def _telegram_api(
     request_options: dict[str, Any] = {"json": payload or {}}
     if timeout is not None:
         request_options["timeout"] = timeout
-    response = await _client.post(_api_url(method), **request_options)
-    response.raise_for_status()
-    result = response.json()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(_api_url(method), **request_options)
+        response.raise_for_status()
+        result = response.json()
     if not result.get("ok"):
         raise RuntimeError(f"Telegram {method} failed: {result.get('description', result)}")
     return result.get("result")

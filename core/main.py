@@ -1,15 +1,21 @@
+import asyncio
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
+from collections.abc import Mapping
+from typing import Any
 import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, select
 
+from brain import llm as brain_llm
+from brain import runtime as brain_runtime
+from brain.events import encode_sse
 from core.models import (
     Customer,
     PaymentLink,
@@ -57,6 +63,11 @@ class ScenarioRequest(BaseModel):
     customer_ref: str | None = None
     settle_after_s: int = 90
     language: str | None = None
+
+
+class DecisionRequest(BaseModel):
+    approved: bool
+    by: str = "dashboard"
 
 
 @app.on_event("startup")
@@ -357,7 +368,7 @@ def get_refund(refund_id: str) -> dict[str, object]:
 
 
 @app.post("/admin/scenario")
-def set_scenario(request: ScenarioRequest) -> dict[str, object]:
+async def set_scenario(request: ScenarioRequest) -> dict[str, object]:
     if request.settle_after_s < 0:
         raise HTTPException(status_code=400, detail="settle_after_s must not be negative")
     with Session(engine) as session:
@@ -368,8 +379,222 @@ def set_scenario(request: ScenarioRequest) -> dict[str, object]:
             request.settle_after_s,
             request.language,
         )
-        return {
-            "ok": True,
-            "customer_id": request.customer_ref or "C1",
-            "created": created,
-        }
+        customer_id = request.customer_ref or "C1"
+        customer = session.get(Customer, customer_id)
+        language = request.language or (customer.language if customer else None) or "en"
+    if created and request.scenario in {
+        "failed_payment",
+        "pending_payment",
+        "duplicate_small",
+        "duplicate_large",
+        "suspicious_refund",
+    }:
+        asyncio.create_task(
+            _start_scenario_background(
+                customer_id,
+                request.scenario,
+                created,
+                language,
+            )
+        )
+    return {
+        "ok": True,
+        "customer_id": customer_id,
+        "created": created,
+    }
+
+
+async def _start_scenario_background(
+    customer_id: str,
+    scenario: str,
+    created_txn_ids: list[str],
+    language: str,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            brain_runtime.start_scenario,
+            customer_id,
+            scenario,
+            created_txn_ids,
+            language,
+        )
+    except Exception as exc:
+        logger.error(
+            "Brain scenario handoff failed for %s (%s)",
+            customer_id,
+            type(exc).__name__,
+        )
+
+
+@app.get("/api/cases")
+def list_brain_cases(status: str | None = None) -> list[dict[str, Any]]:
+    cases = brain_runtime._database.list_cases()
+    if status:
+        accepted = {item.strip() for item in status.split(",") if item.strip()}
+        cases = [case for case in cases if case["status"] in accepted]
+    return [_dashboard_case(case) for case in cases]
+
+
+@app.get("/api/cases/{case_id}")
+def get_brain_case(case_id: str) -> dict[str, Any]:
+    case = brain_runtime._database.get_case(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    result = _dashboard_case(case)
+    events = brain_runtime._database.list_events(case_id=case_id, limit=1000)
+    result["steps"] = [event for event in events if event["type"] == "step"]
+    result["messages"] = [event for event in events if event["type"] == "message"]
+    return result
+
+
+@app.post("/api/cases/{case_id}/decision")
+async def decide_brain_case(
+    case_id: str,
+    request: DecisionRequest,
+) -> dict[str, Any]:
+    try:
+        case = await asyncio.to_thread(
+            brain_runtime.decide_case,
+            case_id,
+            request.approved,
+            request.by,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": case.get("status") in {"resolved", "escalated"},
+        "case_id": case_id,
+        "approved": request.approved,
+        "status": case.get("status"),
+    }
+
+
+@app.get("/api/metrics")
+def get_brain_metrics() -> dict[str, int | float]:
+    database = brain_runtime._database
+    cases = database.list_cases(limit=100000)
+    events = database.list_events(limit=100000)
+    total_cases = len(cases)
+    resolved = [case for case in cases if case["status"] == "resolved"]
+    auto_resolved = sum(not bool(case["data"].get("human_touched")) for case in resolved)
+    escalated = sum(case["status"] == "escalated" for case in cases)
+    durations = [
+        duration
+        for case in resolved
+        if (duration := _resolution_seconds(case)) is not None
+    ]
+    durations.sort()
+    middle = len(durations) // 2
+    median_resolution_s: float = (
+        float(durations[middle])
+        if len(durations) % 2
+        else (durations[middle - 1] + durations[middle]) / 2
+        if durations
+        else 0.0
+    )
+    successful_steps = sum(
+        event.get("ok") is True for event in events if event["type"] == "step"
+    )
+    total_steps = sum(event["type"] == "step" for event in events)
+    refunds = [
+        case
+        for case in resolved
+        if case["data"].get("outcome", {}).get("type") == "create_refund"
+    ]
+    return {
+        "total_cases": total_cases,
+        "auto_resolved": auto_resolved,
+        "auto_resolution_rate": auto_resolved / total_cases if total_cases else 0.0,
+        "escalation_rate": escalated / total_cases if total_cases else 0.0,
+        "median_resolution_s": median_resolution_s,
+        "rupees_recovered": sum(
+            int(case["data"]["outcome"].get("refund_amount", 0))
+            for case in refunds
+            if case["data"].get("outcome", {}).get("verified") is True
+        ),
+        "human_minutes_saved": auto_resolved * 8,
+        "step_success_rate": successful_steps / total_steps if total_steps else 0.0,
+        "refunds_auto": sum(not bool(case["data"].get("human_touched")) for case in refunds),
+        "refunds_human": sum(bool(case["data"].get("human_touched")) for case in refunds),
+    }
+
+
+@app.get("/api/debug/llm")
+def get_llm_debug_metadata() -> dict[str, list[dict[str, Any]]]:
+    return {"calls": brain_llm.recent_call_metadata(20)}
+
+
+@app.get("/api/stream")
+async def stream_brain_events() -> StreamingResponse:
+    event_hub = brain_runtime._events
+    queue, replay = event_hub.subscribe_with_replay(limit=100)
+
+    async def stream():
+        try:
+            for event in replay:
+                yield encode_sse(event)
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                else:
+                    yield encode_sse(event)
+        finally:
+            event_hub.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _dashboard_case(case: Mapping[str, Any]) -> dict[str, Any]:
+    data = case["data"]
+    concierge = data.get("concierge") or data.get("precomputed_concierge") or {}
+    intent = concierge.get("intent") or data.get("intent") or "payment support"
+    if not isinstance(intent, str):
+        intent = str(getattr(intent, "value", intent))
+    return {
+        "id": case["id"],
+        "status": case["status"],
+        "intent": intent.replace("_", " "),
+        "txn_id": case.get("txn_id"),
+        "chat_id": case.get("chat_id"),
+        "language": case["language"],
+        "source": "telegram" if _is_numeric_chat_id(case.get("chat_id")) else "web",
+        "human_touched": bool(data.get("human_touched", False)),
+        "created_at": case["created_at"],
+        "resolved_at": data.get("resolved_at"),
+        "outcome": data.get("outcome"),
+        "approval": data.get("approval"),
+        "plan": data.get("plan"),
+        "verdict": data.get("verdict"),
+        "verdict_reason": data.get("verdict_reason"),
+    }
+
+
+def _resolution_seconds(case: Mapping[str, Any]) -> float | None:
+    ended = case["data"].get("resolved_at") or case["updated_at"]
+    try:
+        start = datetime.fromisoformat(str(case["created_at"]))
+        finish = datetime.fromisoformat(str(ended))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if finish.tzinfo is None:
+            finish = finish.replace(tzinfo=timezone.utc)
+        return max(0.0, (finish - start).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_numeric_chat_id(chat_id: Any) -> bool:
+    if chat_id is None:
+        return False
+    value = str(chat_id)
+    if value.startswith("-"):
+        value = value[1:]
+    return bool(value) and value.isascii() and value.isdigit()
