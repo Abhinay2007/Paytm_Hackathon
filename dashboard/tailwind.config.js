@@ -4,8 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
+        background: '#F6F8FB',
+        surface: '#FFFFFF',
+        border: '#E3E8EF',
+        text: '#0B1B33',
+        muted: '#5B6B82',
+        accent: '#0A6CFF',
         navy: '#002E6E',
-        cyan: '#00BAF2',
+        verified: '#0E9F6E',
+        awaiting: '#D97706',
+        blocked: '#DC2626',
       },
     },
   },

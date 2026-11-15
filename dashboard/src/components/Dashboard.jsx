@@ -30,7 +30,7 @@ export default function Dashboard() {
   }, [loadInitial])
 
   return (
-    <main className="app-shell min-h-screen text-slate-800">
+    <main className="app-shell min-h-screen">
       <Header connected={connected} onScan={scanNow} onReset={resetDemo} />
       <div className="dashboard-grid">
         <aside className="left-rail">

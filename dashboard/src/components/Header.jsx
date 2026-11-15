@@ -1,6 +1,6 @@
-import { Activity, RotateCcw, ScanSearch, ShieldCheck } from 'lucide-react'
+import { Activity, ShieldCheck } from 'lucide-react'
 
-export default function Header({ connected, onScan, onReset }) {
+export default function Header({ connected }) {
   return (
     <header className="topbar">
       <div className="brand-lockup">
@@ -8,25 +8,17 @@ export default function Header({ connected, onScan, onReset }) {
           <ShieldCheck size={23} strokeWidth={2.3} />
         </div>
         <div>
-          <p className="brand-eyebrow">PAYTM · MITRA AI</p>
-          <h1>Mission Control</h1>
+          <h1>Paytm Mitra</h1>
         </div>
       </div>
 
       <div className="topbar-actions">
         <div className="connection-status" role="status" aria-live="polite">
           <span className={`connection-dot ${connected ? 'is-connected' : 'is-disconnected'}`} />
-          <span>{connected ? 'Live stream connected' : 'Connecting to platform'}</span>
+          <span>{connected ? 'Live' : 'Connecting'}</span>
           <Activity size={15} aria-hidden="true" />
         </div>
-        <button className="button button-secondary" type="button" onClick={onReset}>
-          <RotateCcw size={16} />
-          Reset demo
-        </button>
-        <button className="button button-primary" type="button" onClick={onScan}>
-          <ScanSearch size={16} />
-          Scan now
-        </button>
+        <span className="demo-badge">Demo data</span>
       </div>
     </header>
   )
